@@ -1,66 +1,35 @@
 ### Bayesian spatial logit model with Pólya Gamma prior ###
-rm(list=ls())
-
 require(MASS)
 require(BayesLogit)
 require(spdep)
 require(Matrix)
 require(utils)
-
-### generate artifical data
-n=400
-sar_k = 3
-k = 5
-X = cbind(1, matrix(rnorm(n*(sar_k-1)),n,sar_k-1))
-X[,-1] = scale(X[,-1],center = TRUE, scale = FALSE)
-# 7 nearest neighbour W construction from random pattern
-xy <- cbind(runif(n),runif(n))
-nnb =  knn2nb(knearneigh(xy, k=8))
-W=Matrix(nb2mat(nnb,style='W'))
-XX = cbind(X, W %*% X[,-1])
-
-RHO = 0.5
-BETA = c(0,-10,10,-5,5)
-AI = as.matrix(solve(diag(n) - RHO * W))
-nn = rep(1,n) # ´number of trials
-
-MODEL = "SDM"
-
-MU = AI %*% (XX %*% BETA + rnorm(n,0,1) ) 
-pr = as.matrix(1/(1+exp(-MU)) )        # pass through an inv-logit function
-Y = rbinom(n,nn,pr)      # bernoulli response variable
-
-if (all(X[,1] == 1)) {
-  INTERCEPT = TRUE
-} else {INTERCEPT = FALSE}
-meanXs = apply(XX,c(2),mean)
-diag_ind = which(c(diag(n)) == 1)
-vecAI = c(as.matrix(AI))
-meanXmu = vecAI %*% t(BETA[1:sar_k] * meanXs[1:sar_k])
-mu = vecAI %*% t(BETA[1:sar_k]) 
-if (MODEL == "SDM") {
-  vecAIW = c(as.matrix(AI %*% W))
-  if (INTERCEPT) {
-    meanXmu[,-1] = meanXmu[,-1] + vecAIW %*% t(BETA[(sar_k+1):k] * meanXs[(sar_k+1):k]) 
-    mu[,-1] = mu[,-1] + vecAIW %*% t(BETA[(sar_k+1):k]) 
-  } else {
-    meanXmu = meanXmu + vecAIW %*% t(BETA[(sar_k+1):k] * meanXs[(sar_k+1):k]) 
-    mu = mu + vecAIW %*% t(BETA[(sar_k+1):k]) 
-  }
-} 
-ddd = exp(meanXmu)
-ddd = ddd / (1+ddd) *  mu
-DIRECT_FX = colSums(ddd[diag_ind,])/n
-TOTAL_FX = colSums(ddd) / n
-INDIRECT_FX = TOTAL_FX - DIRECT_FX
-
-
+#' Spatial logit estimation using Polya-Gamma priors
+#'
+#' @param X An n x k matrix
+#' @param Y An n x 1 vector of binary or share observations 
+#' @param W An n x n non-negative matrix of row-stochastic spatial weight, with zeros on the main diagonal
+#' @param MODEL Either "SAR" or "SDM" depending on the specification
+#' @param beta_prior_mean An k x 1 vector of prior beta means, defaults to a vector of zeros
+#' @param beta_prior_var An n x n matrix of prior beta variances, defaults to a diagonal matrix with 10^8 variance (relatively flat prior)
+#' @param rho_a The beta binomial prior as on p. 142 of LeSage and Pace (2009) Introduction to Spatial Econometrics. CLC Press 
+#' @param nn An n x 1 vector. Gives tge  number of responses per observation, defaults to 1
+#' @param niter The total number of sampling steps
+#' @param nretain The number of Gibbs sampling steps retained after convergence (must be nretain <= niter)
+#' @param griddy_n The size of the grid for samplign rho, defaults to 100 
+#' @param thinning Computing marginal effects is costly; we do it for only every thinning-nth draw from the posterior chain. 
+#' @param rmin Minimum parameter space for the spatial autoregressive parameter rho; default -1
+#' @param rmax Maximum parameter space for the spatial autoregressive parameter rho; default 1
+#'
+#' @return Returns a list with niter- nretainposterior draws for
+#'   beta, rho, yhat, omega (the latent Polya-Gamma parameters), as well as direct, indirect, and total marginal effects 
 logit_spatial = function(X,Y,W, MODEL = "SDM",
                          beta_prior_mean = matrix(0,ncol(X),1),
                          beta_prior_var = diag(ncol(X)) * 10^8,
                          rho_a = 1.01,nn = rep(1,nrow(X)),
                          niter = 1000,nretain = 500,
-                         griddy_n = 100,thinning = 10) {
+                         griddy_n = 100,thinning = 10,
+                         rmin = -1, rmax = 1) {
   n = nrow(X)
   ndiscard = niter - nretain
   if (all(X[,1] == 1)) {
@@ -101,7 +70,7 @@ logit_spatial = function(X,Y,W, MODEL = "SDM",
   AiXKs = matrix(0,k,griddy_n)
   YAiXs  =matrix(0,griddy_n,k)
   logdets = matrix(NA,griddy_n,2)
-  logdets[,2] = seq(-1,1,length.out = griddy_n + 2)[-c(1,griddy_n+2)]
+  logdets[,2] = seq(rmin,rmax,length.out = griddy_n + 2)[-c(1,griddy_n+2)]
   rrhos = logdets[,2]
   cat("Pre-calculate griddy GIBBS...\n")
   pb <- txtProgressBar(min = 1,max=griddy_n,style = 3)
@@ -228,20 +197,3 @@ logit_spatial = function(X,Y,W, MODEL = "SDM",
               post.indirect = post.indirect,
               post.total = post.total))
 }
-
-res = logit_spatial(X,Y,W)
-
-### calculate posterior mean of beta and sigma
-beta_mean_hat = apply(res$postb,c(1),mean)
-y_mean_hat = apply(res$posty,c(1),mean)
-rho_post_mean = mean(res$postr)
-
-
-# spatial effects estimates
-direct_post_mean = apply(res$post.direct,c(1),mean)
-indirect_post_mean = apply(res$post.indirect,c(1),mean)
-total_post_mean = apply(res$post.total,c(1),mean)
-direct_post_sd = apply(res$post.direct,c(1),sd)
-indirect_post_sd = apply(res$post.indirect,c(1),sd)
-total_post_sd = apply(res$post.total,c(1),sd)
-
